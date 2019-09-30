@@ -1,0 +1,489 @@
+---
+title: "O uso do software R para previsão de séries temporais por meio de redes neurais artificiais"
+author: "Lucas Monteiro Bianchi"
+date: "30/05/2019"
+output: html_document
+---
+Pacotes para serem instalados: http://dontpad.com/LucasSeries
+
+# Analise de séries temporais
+
+Antes de começar qualquer análise, vamos antes definir o diretório de trabalho para o R, carregar seus pacotes e importar os dados.
+
+## Definindo o diretório de trabalho
+
+```{r warning=FALSE, message=FALSE}
+setwd("~/Lucas/Cursos/Curso - Series temporais")
+getwd() #Conferindo o diretório
+```
+
+## Carregando os pacotes necessários
+
+```{r warning=FALSE, message=FALSE}
+library("data.table")
+library("vars")
+library("TSA")
+library("matrixcalc")
+library("RSNNS")
+library("nnet")
+source("funcoes auxiliares.R")
+```
+
+Sobre os pacotes carregados:
+
+* **data.table**: utilizado para importação dos dados. Usaremos a função *fread* deste pacote;
+* **vars**: permite o uso do modelo VAR (vector autoregressive).
+* **TSA**: contém funções importantes para a analise de séries temporais, algumas delas são: *acf* e *pacf*;
+* **matrixcalc**: conjunto de calculos matriciais.
+* **RSNNS e nnet**: trazem um conjunto de funções para o uso de redes neurais MLP
+
+## Importando a série histórica do nivel do rio e da precipitação;
+
+```{r}
+dados <- read.table("dados_rna.txt",sep=";",header=T)
+head(dados,3)
+str(dados)
+```
+
+Sobre o conjunto de dados:
+
+* Os dados são observações diarias a partir de 01/01/2001 até 31/12/2012;
+* A coluna `cota` apresenta os valores médios para o nível do rio;
+* As colunas `Precip` são os dados referentes à precipitação.
+
+## Organizando os dados
+
+Nesta parte estamos atribuindo o tipo `Time-Series` para os dados de cota e precipitação. Note que a função 'ts()' considera a frequência das observações, como estamos trabalhando com dados diários, a frequência é igual a 365.
+
+```{r warning=FALSE, message=FALSE}
+dados$Cota <- ts(dados$Cota,frequency=365,start=c(2001, 1)) #cota (nivel do rio)
+dados$Precip1 <- ts(dados$Precip1,frequency=365,start=c(2001, 1))
+dados$Precip2 <- ts(dados$Precip2,frequency=365,start=c(2001, 1))
+dados$Precip3 <- ts(dados$Precip3,frequency=365,start=c(2001, 1))
+str(dados)
+```
+
+# Séries temporais
+
+Uma série temporal é qualquer conjunto de observações ordenadas no tempo. O objetivo da análise de séries temporais é investigar mecanismos geradores da série, fazer previsões, descrever o comportamento e procurar periodicidade relevante.
+
+Um modelo clássico para séries temporais supõe que $\left\{ {{Z_1} \ldots ,\;{Z_n}} \right\}$ pode ser escrita como
+
+\begin{eqnarray}\label{eqstemporais}
+Z_{t} = T_{t} + S_{t} +a_{t} \hspace{3em} t=1,2,\dots,n,
+\end{eqnarray}
+
+\noindent
+em que $Z_{t}$ representa a série temporal, $T_{t}$ um componente de tendência, $S_{t}$ um componente de sazonalidade e $a_{t}$ é um componente aleatório. Uma das suposições mais frequentes que se faz a respeito de uma série temporal é que ela é estacionária, em outras palavras, ela se desenvolve no tempo aleatoriamente ao redor de uma média constante
+
+## Visualizando os dados da cota
+
+```{r}
+#Grafico: Cota média
+plot(dados$Cota,xlab="Ano",ylab="Cota (cm)",main="Série histórica da cota")
+#Grafico: Cota média diferenciada
+plot(diff(dados$Cota),xlab="Ano",ylab="Cota (diferenciada)",main="Série histórica diferenciada da cota")
+```
+
+Podemos observar que o gráfico da **série histórica da cota** sugere a presença de sazonalidade, pois há uma repetição de picos ao longo da série a cada um ano. Muitos testes estatísticos utilizados no estudo de séries temporais se baseiam na pressuposição de estacionaridade e desta forma, a componente sazonal precisa ser removida. Para isso, basta diferenciarmos a série usando a função *diff()*. Algumas vezes é necessário que a série seja diferenciada mais vezes, entretanto, é importante saber que a cada o comprimento da série (n) diminui em 1 para cada vez que ela é diferenciada.
+
+A primeira diferença definida como:
+
+\begin{eqnarray*}
+\Delta Z_{t}=Z_{t}-Z_{t-1} \hspace{3em} t=1,2,\dots,n.
+\end{eqnarray*}
+
+Generalizando o processo de diferenciação, tem-se que:
+
+\begin{eqnarray*}
+\Delta^{n} Z_{t}  = \Delta\{\Delta^{n-1} Z_{t}\},  \hspace{3em} t=1,2,\dots,n.
+\end{eqnarray*}
+
+```{r}
+acf(dados$Cota,ylab="Cota media",xlab="Tempo",main="Função de autocorrelação (FAC) para a cota")
+pacf(dados$Cota,ylab="Cota media ",xlab="Tempo",main="Função de autocorrelação parcial (FACP) para a cota")
+```
+
+## Visualizando os dados da precipitação - Estação 1
+
+```{r}
+#Plotando as series historicas para a precipitação - Estação 1
+plot(dados$Precip1,xlab="Ano",ylab="Precipitacao (mm)",main="Série histórica da precipitacao - Est. 1")
+plot(diff(dados$Precip1),xlab="Ano",ylab="Precipitacao (diferenciada)",main="Série histórica diferenciada da precipitacao - Est. 1")
+```
+
+## Verificando a sazonalidade
+
+Vimos acima que a cota apresenta sazonalidade e estimar a sua ocorrência é importante para entendermos a dinamicidade da série.
+
+As sazonalidades podem ser classificadas em dois tipos:
+\begin{itemize}
+\item Aditiva: A série apresenta flutuações sazonais mais ou menos constantes não importando o nível global da série.
+\item Multiplicativa: O tamanho das flutuações sazonais varia dependendo do nível global da série.
+\end{itemize}
+
+```{r}
+#Grafico: Periodograma da cota média
+periodo=periodograma(dados$Cota)
+plot(periodo,type="l",ylab="Espectro",xlab="Tempo (dias)")
+```
+
+No gráfico do periodograma, a frequência $f_{i}$ é representada no eixo das ordenadas e a intensidade da frequência $I(f_{i})$ no das abscissas. Geralmente, o pico de maior intensidade é o componente periódico. 
+
+Caso existam mais de um pico, aplica-se o teste de Fisher, para verificar se os picos são componentes periódicos genuíno.
+
+\begin{eqnarray*}
+\left\{\begin{matrix}
+H_{0}: \textrm{não existe sazonalidade;}\\
+\noindent
+H_{1}: \textrm{existe sazonalidade.}
+\end{matrix}\right.
+\end{eqnarray*}
+
+### Estimando a sazonalidade
+
+Considera-se como sazonais os fenômenos que ocorrem regularmente no período máximo de 12 meses. Toda periodicidade acima do período de 12 meses é considerada ciclo. Retirando-se o efeito do ciclo, a série pode perder muitas observações, o que prejudica e dificulta o ajuste do modelo.
+
+```{r}
+Fisher.test(periodo) #H0: Nao existe sazonalidade
+p <- Fisher.test(periodo)[4] #periodo
+n <- length(dados$Cota)
+t <- seq(1,n,1)
+model <- nls(Cota~mu+a1*cos(2*pi*t/p)+a2*cos(4*pi*t/p)+
+            a3*cos(6*pi*t/p)+b1*sin(2*pi*t/p)+
+            b2*sin(4*pi*t/p)+b3*sin(6*pi*t/p),
+          start=list(mu=10,a1=-1,a2=10,a3=1,b1=10,b2=10,b3=1),data = dados)
+summary(model) 
+e <- resid(model) # série livre de sazonalidade
+plot(e,xlab="Tempo",ylab=expression(a[t] == Y[t] - hat(S[t])),type="l",main="Série residual do modelo não-linear (modelo 1)")
+```
+
+Plotando o periodograma.
+
+```{r}
+P <- periodograma(e)
+Fisher.test(P)
+```
+
+Apesar de obtermos uma estimativa para a sazonalidade sendo este ainda significativo, temos que o parâmetro 'b2' não é significativo, fazemos novamente a modelagem, porém, desta vez removemos o parâmetro 'b2'.
+
+```{r}
+# Parâmetro b_2 nâo significativo.
+model2 <- nls(Cota~mu+a1*cos(2*pi*t/p)+a2*cos(4*pi*t/p)+
+            a3*cos(6*pi*t/p)+b1*sin(2*pi*t/p)+b3*sin(6*pi*t/p),
+          start=list(mu=10,a1=-1,a2=10,a3=1,b1=10,b3=1),data = dados)
+summary(model2)
+e2 <- resid(model2) # série livre de sazonalidade
+plot(e2,xlab="Tempo",ylab=expression(a[t] == Y[t] - hat(S[t])),type="l",main="Série residual do modelo não-linear (modelo 2)")
+```
+
+Plotando o periodograma.
+
+```{r}
+P2 <- periodograma(e2)
+Fisher.test(P2)
+```
+
+Refeita a modelagem, agora o modelo ajustado apresenta todos os parametros significativos e temos que também que a sazonalidade é significativa, ou seja, a um nível de significancia de 5% podemos dizer que a cota tem um periodo sazonal de aproximadamente 346 dias. 
+
+## Verificando a tendência
+
+Outra caracteristica das séries temporais é a presença de tendência. De modo simplificado, podemos entender a tendência como um contínuo aumento ou descressímo do valor observado durante um periodo de tempo. Se a série histórica apresenta tendência, então ela não é estacionária. Um dos testes utilizados para verificar a presença de tendência é o 'Cox Stuart test'.
+
+```{r}
+#Tendencia: Cox Stuart Test
+cs.test(dados$Cota) #H0: A série nao apresenta tendencia
+```
+
+
+## Função de Autocorrelação (FAC)
+
+A função de autocorrelação (FAC) é importante para conhecer a relação entre as observações atuais e as anteriores. 
+
+A autocorrelação entre as séries $z_{t}$ e $z_{t-1}$ (autocorrelação com lag 1) indicará como os valores da série estão relacionados com seus valores imediatamente precedentes, enquanto que a autocorrelação entre $z_{t}$ e $z_{t-2}$ (autocorrelação com lag 2) fornecerá uma relação dos valores da série $z_{t}$ com aqueles atrasados em dois intervalos de tempo. Desta forma, a generalização da autocorrelação com $\tau$ atrasos para uma série temporal com n elementos é dada pela expressão abaixo
+
+\begin{eqnarray*}
+r_{\tau}=\frac{\sum_{t=1}^{n-\tau}(z_{t}-\bar{z})(z_{t+\tau}-\bar{z})}{\sum_{t=1}^{n}(z_{t}-\bar{z})^2}
+\end{eqnarray*}
+
+A função de autocovariância (FACV) é dada por
+
+\begin{eqnarray*}
+\gamma _{\tau} = E\{Z_{t}Z_{t+\tau}\},
+\end{eqnarray*}
+
+```{r}
+acf(dados$Precip1,ylab="Cota media",xlab="Tempo",main="Função de autocorrelação (FAC) para a precipitação - Est. 1")
+```
+
+## Função de Autocorrelação Parcial (FACP)
+
+A ideia de autocorrelação pode ser estendida. Se medirmos a correlação entre duas observações seriais, $z_{t}$ e $z_{t+\tau}$, eliminando a dependência dos termos intermediários, $z_{t+1}, z_{t+2},\dots z_{t+\tau-1}$, temos o que se denomina autocorrelação parcial, representada por
+
+\begin{eqnarray*}
+Cov(z_{t},z_{t-\tau}|z_{t-1},\dots,z_{t-(\tau+1)}).
+\end{eqnarray*}
+
+O coeficiente de correlação parcial é utilizado para medir o grau de associação entre as observações $z_{t}$ e $z_{t+\tau}$, quando os efeitos das defasagens até $\tau - 1$ são fixadas e geralmente são apresentados em um correlograma. O correlograma é um gráfico com os $\tau$ primeiros coeficientes de autocorrelação como função de $\tau$ e é um instrumento importante para identificar características da série temporal. Pode-se pensar, de modo meramente ilustrativo, que a autocorrelação parcial (FACP) pode ser definida como a contribuição da correlação em uma determinada defasagem dada a ausência dos coeficientes das demais defasagens. 
+
+```{r}
+pacf(dados$Precip1,ylab="Cota media",xlab="Tempo",main="Função de autocorrelação parcial (FACP) para a precipitação - Est. 1")
+```
+
+## Funcao de auto correlacao cruzada (CCF)
+
+A sua utilidade é para determinar se existe uma relação entre duas séries temporais. Para isso, devemos procurar pelas correlações significativas (aquelas que ultrapassam 2 devios padrão da média, expressos pelas linhas azuis).
+
+A função de correlação cruzada (CCF) entre os processos $X_{t}$ e $Y_{t}$ é definida como
+
+\begin{eqnarray*}
+R_{XY}(t_{1},t_{2}) = E[X(t_{1})Y(t_{2})].
+\end{eqnarray*}
+
+### FACC: Cota com Precipitacao - Est. 1
+```{r warning=FALSE, message=FALSE}
+#Funcao de auto correlacao cruzada
+ccf(dados$Cota,dados$Precip1,main="Cota vs Precipitacao - Est. 1")
+```
+
+### FACC: Cota com Precipitacao - Est. 2
+```{r warning=FALSE, message=FALSE}
+#Funcao de auto correlacao cruzada
+ccf(dados$Cota,dados$Precip2,main="Cota vs Precipitacao - Est. 2")
+```
+
+### FACC: Cota com Precipitacao - Est. 3
+
+```{r warning=FALSE, message=FALSE}
+#Funcao de auto correlacao cruzada
+ccf(dados$Cota,dados$Precip3,main="Cota vs Precipitacao - Est. 3")
+```
+
+## Usando o modelo VAR
+
+O modelo VAR é uma extensão de uma regressão univariada para um ambiente multivariado, onde cada equação definida pelo VAR é uma regressão por mínimos quadrados ordinários de determinada variável em variáveis defasadas de si própria e de outras variáveis componentes do modelo. 
+
+Podem ser usados como modelos de previsão de séries temporais para duas ou mais séries (vetor), sem distinção de endogeneidade ou exogeneidade e incorporam componentes autorregressivos e valores defasados das demais séries.
+
+A função 'VAR' precisa de duas séries históricas, porém essas séries precisam estar contidas dentro de um mesmo 'data.frame'. 
+
+A utilização do modelo VARS para o nosso caso será apenas visando identificar o maior lag significativo, pois compreende-se que há uma dependencia temporal entre as duas séries até o dado lag. Essa informação (o lag) é importante para quando formos utilizar a tecnica de causalidade de granger.
+
+### VAR: Cota com Precipitacao - Est. 1
+```{r warning=FALSE, message=FALSE}
+#Modelo vector autorregressive
+var.1c <- VAR(dados[c(4,5)], p = 31, type = "const")
+summary(var.1c) #Olhar o lag. O que ocorre ate 31 dias afeta a serie.
+```
+
+### VAR: Cota com Precipitacao - Est. 2
+```{r warning=FALSE, message=FALSE}
+var.2c <- VAR(dados[c(4,6)], p = 31, type = "const")
+summary(var.2c) #Olhar o lag. O que ocorre ate 31 dias afeta a serie.
+```
+
+### VAR: Cota com Precipitacao - Est. 3
+```{r warning=FALSE, message=FALSE}
+var.3c <- VAR(dados[c(4,7)], p = 31, type = "const")
+summary(var.3c) #Olhar o lag. O que ocorre ate 31 dias afeta a serie.
+```
+
+## Causalidade de Granger
+
+Em séries temporais, eventos passados podem causar eventos presentes. Mas eventos presentes não podem causar eventos passados.
+
+Por exemplo, considere duas séries de tempo $X_{t}$ e $Y_{t}$. $X_{t}$ causa $Y_{t}$ se a informação passada da variável $X_{t}$ permite melhorar as predições da variável $Y_{t}$. Desse modo, $Y_{t}$ é melhor previsto com base nos valores passados de $X_{t}$ e $Y_{t}$ do que apenas de $Y_{t}$. 
+
+Quando as séries são estacionárias, o teste de causalidade de Granger é realizado no contexto de um modelo VAR bidimensional de ordem $p$. 
+
+\begin{enumerate}
+\item Causalidade unidirecional: se $X_{t}$ causa $Y_{t}$ $(X_{t} \rightarrow Y_{t})$ quando o valor de $Y_{t}$ é melhor previsto se o valor de $X_{t}$ for incluído;
+\item Causalidade unidirecional: se $Y_{t}$ causa $X_{t}$ $(Y_{t} \rightarrow X_{t})$ quando o valor de $X_{t}$ é melhor previsto se o valor de $Y_{t}$ for incluído;
+\item Causalidade bidirecional: se $X_{t}$ causa $Y_{t}$ e $Y_{t}$ causa $X_{t}$ $(Y_{t}\leftrightarrow X_{t})$ quando o valor de ambas as séries tem melhor previsão com adição da outra;
+\item Independência: se $X_{t}$ não causa $Y_{t}$ e $Y_{t}$ não causa $X_{t}$ $(Y_{t} \leftrightarrow X_{t})$ quando a previsão do valor de ambas as séries não é afetada com a adição da outra.
+\end{enumerate}
+
+### Usando o pacote VARS
+
+A vantagem do pacote VARS é que a função 'causality' não precisa ter o lag informado e ainda calcula a causalidade instantanea.
+```{r}
+#Cointegracao de Granger. Precipitacoes causam cotas? H0: X nao causa Y
+causality(var.1c, cause = "Precip1")
+
+causality(var.2c, cause = "Precip2")
+
+causality(var.3c, cause = "Precip3")
+```
+
+### Usando o pacote lmtest
+
+Diferente do pacote VARS, o pacote lmtest pode considerar o lag máximo obtido pelo modelo VAR, porém este não calcula a causalidade instantanea.
+
+```{r}
+#Cointegracao de Granger. Precipitacoes causam cotas? H0: X nao causa Y
+grangertest(dados$Cota ~ dados$Precip1, order=31)
+
+grangertest(dados$Cota ~ dados$Precip2, order=31)
+
+grangertest(dados$Cota ~ dados$Precip3, order=31)
+```
+
+## Teste de igualdade das funções de autocorrelação 
+
+O teste proposto por Quenouille (1958) visa comparar se as duas séries ou duas seções de séries têm a mesma estrutura de correlação. Este teste não requer que as séries tenham o mesmo número de observações, **porém necessita-se que sejam estacionárias** e tem-se as seguinte hipóteses a serem testadas:
+
+\begin{eqnarray*}
+\left\{\begin{matrix}
+H_{0}:\rho_{1}(j)=\rho_{2}(j),\hspace{2cm}j=±1,±2,...,J,\\
+\noindent
+H_{1}:\rho_{1}(j)\not\equiv \rho_{2}(j),\hspace{2cm}j=±1,±2,...,J,
+\end{matrix}\right.
+\end{eqnarray*}
+
+O calculo desta estatística no R é mais complicado, pois sua função não esta implementada em um pacote.
+
+Para realizar esse teste, necessitamos seguir os seguintes passos:
+\begin{enumerate}
+\item Utilizar as séries diferenciadas;
+\item Obter os lags da FAC de cada série considerando pelo menos um lag a mais do que o maior lag obtido utilizando o modelo var;
+\item Combinar esses lags, para isso multiplicamos o tamanho de cada série pelos seus respectivos lags e então somamos os produtos obtidos das duas séries e dividimos pela soma da quantidade de observações da série 1 e 2;
+\item Uma vez obitda essas séries, precisamos fazer alguns calculos matriciais
+\end{enumerate}
+
+
+# O uso da rede neural MLP na previsao de series temporais
+
+Uma rede \emph{perceptron} consiste em um conjunto de neurônios conectados formando uma rede, sendo que cada neurônio recebe um sinal de entrada e responde gerando um sinal de saída. O neurônio processa a combinação linear das entradas incorporando com a tendência, então a soma resultante passa pela função de ativação.
+
+Uma rede \emph{back-propagation} tem uma camada de entrada, uma de saída e pelo menos uma camada escondida. De acordo com \citeonline{cardon1994}, o erro obtido na saída é transferido para as camadas intermediárias, daí o nome \emph{back-propagation} (retro-propagação). Isso se dá pela necessidade de ajuste dos neurônios que não têm contato com a saída, necessitando, assim, de algum parâmetro para atualização dos pesos. O cálculo do erro começa na última camada e tem a forma:
+
+\begin{eqnarray*}
+\varepsilon s_{i}(t)= S(t)\left(1 - S(t)\right)\left(d_{i}(t)- S(t)\right),
+\end{eqnarray*}
+
+\noindent
+em que S é a saída linear, d a saída desejada, e i o neurônio atual. A partir deste erro, são ajustados os pesos da última camada
+
+Não há uma quantidade certa ou melhor configuração no layout de uma rede neural com \emph{back-propagation}, mas há algumas regras que surgiram ao longo do tempo e vêm sendo usadas por vários pesquisadores. Devido muitas redes neurais serem baseadas no mesmo conceito de neurônios, conexões e funções, há algumas diferenças entre as estruturas de redes.
+
+\begin{itemize}
+\item Regra 1: Quanto mais complexo for a relação entre os dados de entrada e a saída desejada, deve-se aumentar a quantidade de processos nas camadas escondidas.
+\item Regra 2: Se o processo de modelagem for separado em múltiplos estágios, pode ser necessário aumentar a quantidade de camadas escondidas. Se não for, então as camadas adicionais podem memorizar os dados ao invés de produzir uma solução generalizada (\emph{overfitting}).
+\end{itemize}
+
+## Normalizar os dados
+
+A normalização serve para evitar que grandes variações dos valores da entrada dificultem o treinamento e o aprendizado da rede. Devido à cota e a precipitação utilizarem escalas unitárias diferentes é necessário que esses valores sejam normalizados. A normalização também serve para manter os valores das entradas proporcionais aos limites das funções de ativação sigmoid logística, cujos valores são limitados pelo intervalo $[0,1]$
+
+```{r}
+cota <- (dados$Cota-min(dados$Cota))/(max(dados$Cota)-min(dados$Cota))
+```
+  
+## Separando o conjunto de treinamento, teste e validação  
+```{r}
+n <- length(cota) #total de dados
+prev <- 730 #Numero de previsoes
+
+cota1 <- cota[1:(n-prev)] ##Conjunto de treinamento e teste
+cotaprev <- cota[(n-prev+1):n]
+```
+
+## Incluindo o tempo de defasagem na rede
+```{r}
+defasagem <- 7
+dados1 <- gdados(cota1,defasagem) ##7 representa o numero de dias anteriores
+x <- dados1$entrada
+y <- dados1$saida
+
+###Cria dados de treino e teste, ratio determina a proporção de teste
+dados2=splitForTrainingAndTest(x,y,ratio=0.25)
+```
+
+## Treinando a rede neural
+
+As redes neurais possuem a capacidade de aprender determinando a intensidade de conexões entre os neurônios pertencentes à rede. A designação de uma rede neural, na resolução de um determinado problema, passa inicialmente por um processo de aprendizagem, onde a rede procura extrair informações relevantes de padrões de informação apresentados a ela. O treinando da rede neural esta sendo feita com uma camada e taxa de aprendizagem em 0.1.
+
+```{r}
+#size determina o numero de neur?nios por camada
+#maxit=numero de iterações
+#learnFuncParams= Parametros de aprendizagem size determina o numero de neuronios em cada camada intermediaria
+set.seed(123)
+model <- mlp(dados2$inputsTrain, dados2$targetsTrain,
+          inputsTest=dados2$inputsTest,
+          targetsTest=dados2$targetsTest,
+          learnFuncParams=c(0.01, 0.01), 
+          size=c(7),
+          maxit=1000)
+```
+
+## Extraindo os coeficientes da rede
+
+```{r}
+summary(model)
+model
+weightMatrix(model)
+extractNetInfo(model)
+```
+
+## Comparando o teste da rede com os valores reais
+```{r}
+par(mfrow=c(1,1))
+plotIterativeError(model,ylim=c(0,50))
+legend("bottomright",legend=c("Treinamento","Teste"),col=c(1,2),lty = 2)
+pred <- predict(model,dados2$inputsTest)
+plot(dados2$targetsTest,type="l",main="conjunto de teste")
+lines(pred,col=2)
+legend("topright",legend=c("Real","Previsto"),col=c(1,2),lty = 2)
+```
+
+## Validacao da rede
+
+Nesta parte estamos entrando com dados que a rede desconhece.
+```{r}
+valida <- gdados(cotaprev,7)
+entrada <- valida$entrada
+pred2 <- predict(model,entrada)
+plot(cotaprev[7:(length(cotaprev)-1)],type="l")
+lines(pred2,col=2)
+legend("topright",legend=c("Real","Previsto"),col=c(1,2),lty = 2)
+```
+
+```{r}
+#####Teste
+real <- dados2$targetsTest*((max(dados$Cota)-min(dados$Cota)))+min(dados$Cota)
+previsto=pred*((max(dados$Cota)-min(dados$Cota)))+min(dados$Cota)
+par(mfrow=c(1,1))
+plotIterativeError(model,ylim=c(0,50))
+legend("bottomright",legend=c("Treinamento","Teste"),col=c(1,2),lty = 2)
+pred <- predict(model,dados2$inputsTest)
+plot(real,type="l",main="conjunto de teste")
+lines(previsto,col=2)
+legend("topright",legend=c("Real","Previsto"),col=c(1,2),lty = 2)
+```
+
+## Validacao
+Aqui estamos transformando os dados de volta para a escala original.
+
+```{r}
+real2 <- cotaprev[7:(length(cotaprev)-1)]*((max(dados$Cota)-min(dados$Cota)))+min(dados$Cota)
+previsto2 <- pred2*((max(dados$Cota)-min(dados$Cota)))+min(dados$Cota)
+plot(real2,type="l",main="conjunto de Validação")
+lines(previsto2,col=2)
+legend("topright",legend=c("Real","Previsto"),col=c(1,2),lty = 2)
+```
+
+## Mean Absolute Percent Error - MAPE
+É uma das medidas utilizadas para analisar os erros gerados pelas previsões é o MAPE, denotado por:
+
+\begin{eqnarray*}
+MAPE=\frac{1}{n}\sum_{t=1}^{n}\left|\frac{(A_{t}-F_{t})}{A_{t}}\right|,
+\end{eqnarray*}
+
+em que $A_{t}$ é o valor real e $F_{t}$ é o valor previsto e n o comprimento da série. A diferença entre $A_{t}$ e $F_{t}$ é dividido por $A_{t}$. O valor absoluto desse cálculo é somado para cada ponto previsto no tempo e então dividido novamente pelo número de observações reais. A rede escolhida será aquela que possuir menor MAPE.
+
+```{r}
+mape=(1/prev)*sum((previsto2-real2[1: nrow(previsto2)])/previsto2)
+mape
+```
+
+
